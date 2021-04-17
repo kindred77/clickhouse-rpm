@@ -21,6 +21,8 @@
 ##
 function publish_packagecloud_distro_version_id()
 {
+	# curl https://$PACKAGECLOUD_ID:@packagecloud.io/api/v1/distributions.json
+	#
 	# EL6  - 27
 	# EL7  - 140
 	# FC25 - 179
@@ -34,29 +36,29 @@ function publish_packagecloud_distro_version_id()
 
 
 	if os_centos; then
-		if [ $DISTR_MAJOR == 6 ]; then
+		if [ "$DISTR_MAJOR" == "6" ]; then
 			return 27
-		elif [ $DISTR_MAJOR == 7 ]; then
+		elif [ "$DISTR_MAJOR" == "7" ]; then
 			return 140
 		else
 			echo "Unknown centos distro"
 			exit 1
 		fi
 	elif os_fedora; then
-		if [ $DISTR_MAJOR == 25 ]; then
+		if [ "$DISTR_MAJOR" == "25" ]; then
 			return 179
-		elif [ $DISTR_MAJOR == 26 ]; then
+		elif [ "$DISTR_MAJOR" == "26" ]; then
 			return 184
 		else
 			echo "Unknown fedora distro"
 			exit 1
 		fi
 	elif os_ubuntu; then
-		if [ $DISTR_MAJOR == 14 ] && [ "${DISTR_MINOR}" == "04" ]; then
+		if [ "$DISTR_MAJOR" == "14" ] && [ "${DISTR_MINOR}" == "04" ]; then
 			return 20
-		elif [ $DISTR_MAJOR == 16 ] && [ "${DISTR_MINOR}" == "04" ]; then
+		elif [ "$DISTR_MAJOR" == "16" ] && [ "${DISTR_MINOR}" == "04" ]; then
 			return 165
-		elif [ $DISTR_MAJOR == 18 ] && [ "${DISTR_MINOR}" == "04" ]; then
+		elif [ "$DISTR_MAJOR" == "18" ] && [ "${DISTR_MINOR}" == "04" ]; then
 			return 190
 		else
 			echo "Unknown ubuntu distro"
@@ -86,6 +88,13 @@ function publish_packagecloud_file()
 	# Path to file to publish
 	FILE_PATH=$4
 
+	# Check curl is in place
+	if ! curl --version > /dev/null; then
+		echo "curl is not available, can not continue"
+		exit 1
+	fi
+
+
 	echo -n "Publishing file: $FILE_PATH"
 	if curl --show-error --silent --output /dev/null -X POST https://$PACKAGECLOUD_ID:@packagecloud.io/api/v1/repos/$PACKAGECLOUD_PATH/packages.json \
 		-F "package[distro_version_id]=$DISTRO_VERSION_ID" \
@@ -106,7 +115,7 @@ function publish_packagecloud_files_list()
 	PACKAGECLOUD_ID=$1
 
 	# Path inside user's repo on packagecloud. Ex.: altinity/clickhouse
-	PACKAGECLOUD_PATH="altinity/clickhouse"
+	PACKAGECLOUD_PATH=$2
 
 	# Packagecloud distro version id. See packagecloud_distro_version_id() function. Ex.: 27
 	publish_packagecloud_distro_version_id
@@ -117,7 +126,7 @@ function publish_packagecloud_files_list()
 
 	if [ -n "$2" ]; then
 		# Have args specified. Treat it as a list of files to publish
-		for FILE in ${@:2}; do
+		for FILE in ${@:3}; do
 			publish_packagecloud_file $PACKAGECLOUD_ID $PACKAGECLOUD_PATH $DISTRO_VERSION_ID $FILE
 		done
 	else
@@ -134,18 +143,18 @@ function publish_packagecloud()
 	PACKAGECLOUD_ID=$1
 
 	# Path inside user's repo on packagecloud. Ex.: altinity/clickhouse
-	PACKAGECLOUD_PATH="altinity/clickhouse"
+	PACKAGECLOUD_PATH=$2
 
 	# Packagecloud distro version id. See packagecloud_distro_version_id() function. Ex.: 27
 	publish_packagecloud_distro_version_id
 	DISTRO_VERSION_ID=$?
 
-	if [ -n "$2" ]; then
+	if [ -n "$3" ]; then
 		# Have args specified. Treat it as a list of files to publish
-		publish_packagecloud_files_list $PACKAGECLOUD_ID ${@:2}
+		publish_packagecloud_files_list $PACKAGECLOUD_ID $PACKAGECLOUD_PATH ${@:3}
 	else
 		# Do not have any files specified. Publish RPMs from RPMS path
-		publish_packagecloud_files_list $PACKAGECLOUD_ID $(ls "$RPMS_DIR"/clickhouse*.rpm)
+		publish_packagecloud_files_list $PACKAGECLOUD_ID $PACKAGECLOUD_PATH $(ls "$RPMS_DIR"/clickhouse*.rpm)
 	fi
 }
 
@@ -156,6 +165,12 @@ function publish_packagecloud_delete()
 {
 	# Packagecloud user id. Ex.: 123ab45678c9012d3e4567890abcdef1234567890abcdef1
 	PACKAGECLOUD_ID=$1
+
+	# Check curl is in place
+	if ! curl --version > /dev/null; then
+		echo "curl is not available, can not continue"
+		exit 1
+	fi
 
 	if [ -n "$2" ]; then
 		# Have args specified. Treat it as a list of files to delete
@@ -188,4 +203,48 @@ function publish_packagecloud_delete()
 	fi
 
 }
+
+##
+##
+##
+function publish_packagecloud_download()
+{
+	set +x
+	PACKAGES=(clickhouse-test clickhouse-server-common clickhouse-server clickhouse-common-static clickhouse-client)
+
+	# Packagecloud path. Ex.: altinity/clickhouse
+	PACKAGECLOUD_PATH=$1
+
+	# Check curl is in place
+	if ! curl --version > /dev/null; then
+		echo "curl is not available, can not continue"
+		exit 1
+	fi
+
+	if [ -n "$2" ]; then
+		# Have args specified. Treat it as a list of versions to download
+		for VERSION in ${@:2}; do
+			echo "VERSION=$VERSION"
+			for PACKAGE in ${PACKAGES[@]}; do
+				while true; do
+					echo "PACKAGE=$PACKAGE"
+					URL="https://packagecloud.io/${PACKAGECLOUD_PATH}/packages/el/7/${PACKAGE}-${VERSION}-1.el7.x86_64.rpm/download.rpm"
+					echo ""
+					echo ""
+					echo -n $URL
+					if wget --content-disposition "${URL}"; then
+						echo "...OK"
+						break
+					else
+						echo "...FAILED"
+					fi
+				done
+			done
+		done
+	else
+		echo "Please specify VERSION(s) to download"
+	fi
+
+}
+
 

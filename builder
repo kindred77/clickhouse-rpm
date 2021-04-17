@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Yandex ClickHouse DBMS build script for RHEL based distributions
+# ClickHouse DBMS build script for RHEL based distributions
 #
 # Important notes:
 #  - build requires ~35 GB of disk space
@@ -28,14 +28,18 @@
 # limitations under the License.
 
 # Git repository of Clickhouse
-CH_REPO="${CH_REPO:-https://github.com/yandex/ClickHouse}"
+CH_REPO="${CH_REPO:-https://github.com/ClickHouse/ClickHouse}"
 
 # Git version of ClickHouse that we package
-#CH_VERSION="${CH_VERSION:-19.1.14}"
-CH_VERSION="${CH_VERSION:-19.5.3.8}"
+CH_VERSION="${CH_VERSION:-20.8.12.2}"
+
+# Fill if some commits need to be cherry-picked before build
+#CH_EXTRA_COMMITS=( 54a5b801b708701b1ddbda95887465b9f7ae5740 )
+CH_EXTRA_COMMITS=()
 
 # Git tag marker (stable/testing)
-CH_TAG="${CH_TAG:-stable}"
+CH_TAG="${CH_TAG:-lts}"
+#CH_TAG="${CH_TAG:-stable}"
 #CH_TAG="${CH_TAG:-testing}"
 
 # Hostname of the server used to publish packages
@@ -66,6 +70,9 @@ SRC_DIR="$MY_DIR/src"
 
 # Where RPMs would be built - relative to CWD - makes possible to build in whatever folder needed
 RPMBUILD_ROOT_DIR="$CWD_DIR/rpmbuild"
+
+# What version of devtoolset would be used
+DEVTOOLSET_VERSION="9"
 
 # Detect number of threads to run 'make' command
 export THREADS=$(grep -c ^processor /proc/cpuinfo)
@@ -117,9 +124,34 @@ function set_rpmbuild_dirs()
 ##
 ##
 ##
+function check_sudo()
+{
+	if sudo --version > /dev/null; then
+		echo "sudo available, continue"
+	else
+		echo "sudo is not available, try to install it"
+		yum install -y sudo
+
+		# Recheck sudo again
+		if sudo --version > /dev/null; then
+			echo "sudo available, continue"
+		else
+			echo "sudo is not available, can not continue"
+			echo "Install sudo and start again"
+			echo "Exit"
+			
+			exit 1
+		fi
+	fi
+}
+
+##
+##
+##
 function install_general_dependencies()
 {
 	banner "Install general dependencies"
+	check_sudo
 	sudo yum install -y git wget curl zip unzip sed
 }
 
@@ -129,6 +161,7 @@ function install_general_dependencies()
 function install_rpm_dependencies()
 {
         banner "RPM build dependencies"
+	check_sudo
 	sudo yum install -y rpm-build redhat-rpm-config createrepo
 }
 
@@ -139,6 +172,7 @@ function install_build_process_dependencies()
 {
 	banner "Install build tools"
 
+	check_sudo
 	sudo yum install -y make
 
 	if os_centos; then
@@ -150,10 +184,10 @@ function install_build_process_dependencies()
 		fi
 
 		sudo yum install -y centos-release-scl
-		sudo yum install -y devtoolset-8
+		sudo yum install -y devtoolset-"${DEVTOOLSET_VERSION}"
 	elif os_ol; then
 		sudo yum install -y scl-utils
-		sudo yum install -y devtoolset-8
+		sudo yum install -y devtoolset-"${DEVTOOLSET_VERSION}"
 		sudo yum install -y cmake3
 	else
 		# fedora
@@ -175,6 +209,8 @@ function install_workarounds()
 {
 	banner "Install workarounds"
 
+	check_sudo
+
 	# Now all workarounds are included into CMAKE_OPTIONS and MAKE_OPTIONS
 }
 
@@ -184,6 +220,8 @@ function install_workarounds()
 function install_dependencies()
 {
 	banner "Install dependencies"
+
+	check_sudo
 
 	install_general_dependencies
 	install_rpm_dependencies
@@ -197,6 +235,8 @@ function install_dependencies()
 ##
 function install_docker()
 {
+	check_sudo
+
 	sudo yum install -y yum-utils device-mapper-persistent-data lvm2
 	sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 	sudo yum install -y docker-ce
@@ -211,6 +251,8 @@ function install_docker()
 ##
 function install_clickhouse_test_deps()
 {
+	check_sudo
+
 	# Install dependencies required by clickhouse-test
 	sudo yum install -y epel-release
 	sudo yum install -y python-lxml
@@ -258,6 +300,11 @@ function download_sources()
 	echo "Checkout specific tag v${CH_VERSION}-${CH_TAG}"
 	git checkout "v${CH_VERSION}-${CH_TAG}"
 
+	for commit in "${CH_EXTRA_COMMITS[@]}"; do
+		echo "Cherry-pick commit $commit"
+		git cherry-pick $commit
+	done
+
 	echo "Update submodules"
 	git submodule update --init --recursive
 
@@ -301,11 +348,15 @@ function build_spec_file()
 		CMAKE_OPTIONS="${CMAKE_OPTIONS} -DENABLE_JEMALLOC=0"
 		CMAKE_OPTIONS="${CMAKE_OPTIONS} -DGLIBC_COMPATIBILITY=0"
 		CMAKE_OPTIONS="${CMAKE_OPTIONS} -DENABLE_RDKAFKA=0"
+		CMAKE_OPTIONS="${CMAKE_OPTIONS} -DNO_WERROR=1"
 	fi
 
 	if os_centos_7; then
 		echo "CentOS 7 has some special CMAKE_OPTIONS"
 		CMAKE_OPTIONS="${CMAKE_OPTIONS} -DGLIBC_COMPATIBILITY=OFF"
+		CMAKE_OPTIONS="${CMAKE_OPTIONS} -DNO_WERROR=1"
+		# Starting with v20.3 there is new option to tolerate warnings
+		CMAKE_OPTIONS="${CMAKE_OPTIONS} -DWERROR=0"
 	fi
 
 	#CMAKE_OPTIONS="${CMAKE_OPTIONS} -DHAVE_THREE_PARAM_SCHED_SETAFFINITY=1"
@@ -351,9 +402,9 @@ function build_RPMs()
 
 	banner "Setup path to compilers"
 	if os_centos || os_ol; then
-		export CMAKE=cmake3
-		export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
-		export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
+		export CMAKE="cmake3"
+		export CC="/opt/rh/devtoolset-${DEVTOOLSET_VERSION}/root/usr/bin/gcc"
+		export CXX="/opt/rh/devtoolset-${DEVTOOLSET_VERSION}/root/usr/bin/g++"
 		#export CXXFLAGS="${CXXFLAGS} -Wno-maybe-uninitialized"
 	else
 		export CMAKE=cmake
@@ -371,10 +422,20 @@ function build_RPMs()
 	banner "Build RPMs"
 
 	banner "Build SRPMs"
-	rpmbuild -v -bs "$SPECS_DIR/clickhouse.spec"
+	if rpmbuild -v -bs "$SPECS_DIR/clickhouse.spec"; then
+		echo "SRPMs build completed"
+	else
+		banner "SRPMs build FAILED"
+	fi
+	
 	
 	banner "Build RPMs"
-	rpmbuild -v -bb "$SPECS_DIR/clickhouse.spec"
+	if rpmbuild -v -bb "$SPECS_DIR/clickhouse.spec"; then
+		echo "RPMs build completed"
+	else
+		banner "RPMs build FAILED. Can not continue"
+		exit 1
+	fi
 
 	banner "Build RPMs completed"
 
@@ -641,12 +702,21 @@ function usage()
 	echo "./builder test --local-sql"
 	echo "		run several SQL queries on locally installed ClickHouse"
 	echo
-	echo "./builder repo --publish --packagecloud=<packagecloud USER ID>"
-	echo "		publish packages on packagecloud as USER"
+	echo "./builder repo --publish --packagecloud=<packagecloud USER ID> [FILE 1] [FILE 2] [FILE N]"
+	echo "		publish packages on packagecloud as USER. In case no files(s) provided, rpmbuild/RPMS/x86_64/*.rpm would be used"
 	echo "./builder repo --delete  --packagecloud=<packagecloud USER ID> file1_URL [file2_URL ...]"
 	echo "		delete packages (specified as URL to file) on packagecloud as USER"
 	echo "		URL to file to be deleted can be copy+pasted from packagecloud.io site and is expected as:"
 	echo "		https://packagecloud.io/Altinity/clickhouse/packages/el/7/clickhouse-test-19.4.3.1-1.el7.x86_64.rpm"
+	echo ""
+	echo "		OS=centos DISTR_MAJOR=7 DISTR_MINOR=5 ./builder repo --publish --packagecloud=XYZ [file(s)]"
+	echo "		OS=centos DISTR_MAJOR=7 DISTR_MINOR=5 ./builder repo --publish --path=altinity/clickhouse-altinity-stable --packagecloud=XYZ [file(s)]"
+	echo "		./builder repo --delete URL1 URL2 URL3"
+	echo "./builder repo --download [--path=altinity/clickhouse-altinity-stable] <VERSION>"
+
+	echo
+	echo "./builder list --rpms"
+	echo "		list available RPMs"
 	echo
 	echo "./builder src --download"
 	echo "		just download sources"
@@ -693,6 +763,7 @@ FLAG_DOCKER=''
 FLAG_LOCAL=''
 FLAG_LOCAL_SQL=''
 FLAG_PUBLISH=''
+FLAG_PATH='altinity/clickhouse'
 FLAG_PACKAGECLOUD=''
 FLAG_DELETE=''
 FLAG_DOWNLOAD=''
@@ -716,6 +787,7 @@ docker,\
 local,\
 local-sql,\
 publish,\
+path:,\
 packagecloud:,\
 delete,\
 download,\
@@ -832,6 +904,12 @@ while true; do
 	--publish)
 		FLAG_PUBLISH='yes'
 		;;
+	--path)
+		# Arg is recognized, shift to the value, which is the next arg
+		shift
+
+		FLAG_PATH=$1
+		;;
 	--packagecloud)
 		# Arg is recognized, shift to the value, which is the next arg
 		shift
@@ -881,6 +959,17 @@ case $COMMAND in
 
 version)
 	echo "v$CH_VERSION-$CH_TAG"
+	;;
+
+enlarge)
+	# enlarge AWS disk partition up to the whole disk
+	check_sudo
+
+	sudo lsblk
+	sudo yum install -y epel-release
+	sudo yum install -y cloud-utils-growpart
+	sudo growpart /dev/xvda 1
+	sudo reboot
 	;;
 
 all)
@@ -952,6 +1041,7 @@ install)
 
 		RPMFILES_NUM=$(ls $RPMS_DIR/clickhouse-*.rpm 2> /dev/null|wc -l)
 		if [ $RPMFILES_NUM -gt 0 ]; then
+			check_sudo
 			sudo yum install -y $RPMS_DIR/clickhouse*.rpm
 			sudo service clickhouse-server restart
 		else
@@ -974,7 +1064,7 @@ build)
 		build_spec_file
 
 	elif [ ! -z "$FLAG_DOWNLOAD_SOURCES" ]; then
-		banner "build --download"
+		banner "build --download-sources"
 		download_sources
 
 	elif [ ! -z "$FLAG_RPMS" ]; then
@@ -1086,12 +1176,12 @@ test)
 
 repo)
 	if [ ! -z "$FLAG_PUBLISH" ] && [ ! -z "$FLAG_PACKAGECLOUD" ]; then
-		banner "repo --publish --packagecloud=ABC"
+		banner "repo --publish --path=a/b/c --packagecloud=XYZ"
 
 		ensure_os_rpm_based
-		# For publish command files are list of undashed args after the foirst one
+		# for publish command list of files to be published is the list of undashed args after the first one (which is 'repo')
 		FILES=("${UNDASHED_ARGS[@]:1}")
-		publish_packagecloud $FLAG_PACKAGECLOUD ${FILES[@]/#/}
+		publish_packagecloud $FLAG_PACKAGECLOUD $FLAG_PATH ${FILES[@]/#/}
 
 
 	elif [ ! -z "$FLAG_DELETE" ] && [ ! -z "$FLAG_PACKAGECLOUD" ]; then
@@ -1100,10 +1190,26 @@ repo)
 		# run publish script with all the rest of CLI params
 		FILES=("${UNDASHED_ARGS[@]:1}")
 		publish_packagecloud_delete $FLAG_PACKAGECLOUD ${FILES[@]/#/}
+
+	elif [ ! -z "$FLAG_DOWNLOAD" ]; then
+		banner "repo --download"
+
+		# run publish script with all the rest of CLI params
+		VERSIONS=("${UNDASHED_ARGS[@]:1}")
+		publish_packagecloud_download $FLAG_PATH ${VERSIONS[@]/#/}
 	else
 		echo "Unknwon $COMMAND path"
 		exit 1
 	fi
+	;;
+
+list)
+	if [ ! -z "$FLAG_RPMS" ]; then
+		banner "list --rpms"
+		list_RPMs
+		#list_SRPMs
+	fi
+
 	;;
 
 src)
